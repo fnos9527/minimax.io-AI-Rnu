@@ -1,1 +1,9 @@
 # minimax.io-AI-Rnu
+
+MINIMAX_EMAIL
+
+MINIMAX_PASSWORD
+
+TG_BOT_TOKEN
+
+TG_CHAT_ID
