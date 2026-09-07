@@ -20,7 +20,7 @@ def send_telegram_msg(text):
         pass
 
 def nuke_modals(page):
-    """【黑科技】执行 JS 暴力清除页面上的广告弹窗和所有隐形遮罩层"""
+    """暴力清除页面上的广告弹窗和所有隐形遮罩层"""
     page.evaluate('''() => {
         const btns = Array.from(document.querySelectorAll('button'));
         const tryBtn = btns.find(b => b.innerText && b.innerText.includes('Try it now'));
@@ -77,22 +77,42 @@ def main():
             if email_input.is_visible():
                 print("🔑 确认进入登录流程，正在输入邮箱...")
                 email_input.fill(EMAIL)
+                page.wait_for_timeout(500)
                 
-                print("✅ 勾选协议条款...")
-                page.locator("text=I have read and agree to the").first.click(force=True)
-                page.wait_for_timeout(1000) 
+                print("✅ 正在强行勾选协议条款...")
+                # 方案 A: 尝试用 Playwright 点击包含文字的标签 (取最后一个即可视元素)
+                try:
+                    page.locator('text=I have read and agree').last.click(force=True)
+                except:
+                    pass
+                
+                # 方案 B: 无论方案A成没成功，都注入 JS 执行降维打击，强制触发选中
+                page.evaluate('''() => {
+                    // 1. 找到该文字，并点击它的外层父容器(通常是包裹文字和小圆圈的 label/div)
+                    const els = Array.from(document.querySelectorAll('*'));
+                    const agreeEl = els.find(el => el.textContent && el.textContent.includes('I have read and agree'));
+                    if (agreeEl && agreeEl.parentElement) {
+                        agreeEl.parentElement.click();
+                    }
+                    // 2. 暴力寻找页面底层的 checkbox/radio 并修改状态为选中
+                    const inputs = document.querySelectorAll('input[type="checkbox"], input[type="radio"]');
+                    inputs.forEach(i => {
+                        i.checked = true;
+                        i.click();
+                        i.dispatchEvent(new Event('change', { bubbles: true }));
+                    });
+                }''')
+                page.wait_for_timeout(1500) 
                 
                 print("🖱️ 点击 Continue...")
-                # 【本次修复】：加入了 exact=True，告诉脚本只要纯粹的 Continue，不要带 Google 或 Github 的！
                 page.get_by_role("button", name="Continue", exact=True).click(force=True)
-                page.wait_for_timeout(3000) 
                 
-                print("🔑 正在输入密码...")
+                print("🔑 正在等待并输入密码...")
                 page.wait_for_selector('input[placeholder="Enter your password"]', timeout=15000)
                 page.get_by_placeholder("Enter your password").fill(PASSWORD)
+                page.wait_for_timeout(500)
                 
                 print("🖱️ 点击 Continue (登录)...")
-                # 【本次修复】：同上，精确匹配
                 page.get_by_role("button", name="Continue", exact=True).click(force=True)
                 
                 print("⏳ 等待登录完毕并跳回主控制台 (超时设为 30 秒)...")
@@ -105,7 +125,6 @@ def main():
             print("⏳ 正在等待主页数据及签到组件加载 (等待 10 秒)...")
             page.wait_for_timeout(10000) 
             
-            # 再次清理弹窗
             print("🛡️ 再次清理可能弹出的登录后广告...")
             nuke_modals(page)
             page.wait_for_timeout(1000)
@@ -114,10 +133,8 @@ def main():
             print("📸 已保存清理后的主页截图为 dashboard_cleaned.png")
             
             print("🔍 正在查找签到按钮...")
-            # 加上 .first，防止网页里有多个包含 Check in 文本的地方导致报错
             checkin_btn = page.locator('button:has-text("Check in for")').first
             
-            # 如果签到面板没弹出来，尝试暴力点击包含小礼品盒标识的图标
             if not checkin_btn.is_visible():
                 print("⚠️ 签到面板未自动展开，正在使用 JS 遍历点击可能的小礼品盒...")
                 page.evaluate('''() => {
@@ -133,7 +150,6 @@ def main():
                 }''')
                 page.wait_for_timeout(3000)
             
-            # 再次检查签到按钮并领取
             if checkin_btn.is_visible():
                 btn_text = checkin_btn.inner_text()
                 points = re.search(r'\d+', btn_text)
