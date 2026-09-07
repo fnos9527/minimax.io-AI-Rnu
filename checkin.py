@@ -20,17 +20,24 @@ def send_telegram_msg(text):
         pass
 
 def nuke_modals(page):
-    """【黑科技】执行 JS 暴力清除页面上的广告弹窗和隐形遮罩层"""
+    """【黑科技】执行 JS 暴力清除页面上的广告弹窗和所有隐形遮罩层"""
     page.evaluate('''() => {
-        // 1. 查找包含 "Try it now" 的按钮，并把整个广告弹窗物理删除
+        // 1. 删除 Try it now 弹窗
         const btns = Array.from(document.querySelectorAll('button'));
         const tryBtn = btns.find(b => b.innerText && b.innerText.includes('Try it now'));
         if (tryBtn) {
             const modal = tryBtn.closest('div[class*="modal"], div[class*="dialog"], div[role="dialog"]');
             if (modal) modal.remove();
         }
-        // 2. 暴力删除所有可能是遮罩层 (Mask/Overlay) 的元素，防止它们吞掉点击事件
-        document.querySelectorAll('[class*="mask"], [class*="overlay"]').forEach(m => m.remove());
+        // 2. 把这次拦截点击的罪魁祸首也加进黑名单，全部删除
+        const badElements = [
+            '[class*="mask"]', 
+            '[class*="overlay"]', 
+            '[class*="blanket"]', 
+            '[data-connect-mobile-hint-dismiss-boundary]',
+            'div[style*="z-index: 9999"]'
+        ];
+        document.querySelectorAll(badElements.join(', ')).forEach(m => m.remove());
     }''')
 
 def main():
@@ -60,8 +67,9 @@ def main():
             if not email_input.is_visible():
                 sign_in_btn = page.locator('text="Sign in"').first
                 if sign_in_btn.is_visible():
-                    print("👀 发现 [Sign in] 按钮，正在点击进入登录页...")
-                    sign_in_btn.click() # 因为遮罩被删了，这次点击一定生效
+                    print("👀 发现 [Sign in] 按钮，正在使用无视遮挡(force=True)进行强制点击...")
+                    # 这里的 force=True 是核心，无视所有覆盖物直接点击！
+                    sign_in_btn.click(force=True) 
                     print("⏳ 等待跳转至登录页...")
                     try:
                         email_input.wait_for(state="visible", timeout=15000)
@@ -78,7 +86,7 @@ def main():
                 page.wait_for_timeout(1000) 
                 
                 print("🖱️ 点击 Continue...")
-                page.get_by_role("button", name="Continue").click()
+                page.get_by_role("button", name="Continue").click(force=True)
                 page.wait_for_timeout(3000) 
                 
                 print("🔑 正在输入密码...")
@@ -86,7 +94,7 @@ def main():
                 page.get_by_placeholder("Enter your password").fill(PASSWORD)
                 
                 print("🖱️ 点击 Continue (登录)...")
-                page.get_by_role("button", name="Continue").click()
+                page.get_by_role("button", name="Continue").click(force=True)
                 
                 print("⏳ 等待登录完毕并跳回主控制台 (超时设为 30 秒)...")
                 page.wait_for_url("**/agent.minimax.io/**", timeout=30000)
@@ -98,7 +106,7 @@ def main():
             print("⏳ 正在等待主页数据及签到组件加载 (等待 10 秒)...")
             page.wait_for_timeout(10000) 
             
-            # 再次清理弹窗 (防止登录后又弹一个广告遮挡签到)
+            # 再次清理弹窗
             print("🛡️ 再次清理可能弹出的登录后广告...")
             nuke_modals(page)
             page.wait_for_timeout(1000)
@@ -117,14 +125,13 @@ def main():
                     for(let el of allEls) {
                         if (el.className && typeof el.className === 'string') {
                             let c = el.className.toLowerCase();
-                            // 暴力点击类名包含 checkin, gift(礼品) 的所有元素
                             if (c.includes('checkin') || c.includes('gift') || c.includes('reward')) {
                                 el.click();
                             }
                         }
                     }
                 }''')
-                page.wait_for_timeout(3000) # 给面板弹出动画预留时间
+                page.wait_for_timeout(3000)
             
             # 再次检查签到按钮并领取
             if checkin_btn.is_visible():
@@ -133,8 +140,8 @@ def main():
                 points_val = points.group() if points else "未知"
                 
                 print(f"👆 找到签到按钮 [{btn_text}]，准备点击...")
-                checkin_btn.click(force=True)
-                page.wait_for_timeout(4000) # 等待领取成功动画 
+                checkin_btn.click(force=True) # 同样无视遮挡强制点击签到
+                page.wait_for_timeout(4000) 
                 
                 page.screenshot(path="success.png")
                 
