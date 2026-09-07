@@ -22,14 +22,12 @@ def send_telegram_msg(text):
 def nuke_modals(page):
     """【黑科技】执行 JS 暴力清除页面上的广告弹窗和所有隐形遮罩层"""
     page.evaluate('''() => {
-        // 1. 删除 Try it now 弹窗
         const btns = Array.from(document.querySelectorAll('button'));
         const tryBtn = btns.find(b => b.innerText && b.innerText.includes('Try it now'));
         if (tryBtn) {
             const modal = tryBtn.closest('div[class*="modal"], div[class*="dialog"], div[role="dialog"]');
             if (modal) modal.remove();
         }
-        // 2. 把这次拦截点击的罪魁祸首也加进黑名单，全部删除
         const badElements = [
             '[class*="mask"]', 
             '[class*="overlay"]', 
@@ -68,7 +66,6 @@ def main():
                 sign_in_btn = page.locator('text="Sign in"').first
                 if sign_in_btn.is_visible():
                     print("👀 发现 [Sign in] 按钮，正在使用无视遮挡(force=True)进行强制点击...")
-                    # 这里的 force=True 是核心，无视所有覆盖物直接点击！
                     sign_in_btn.click(force=True) 
                     print("⏳ 等待跳转至登录页...")
                     try:
@@ -82,11 +79,12 @@ def main():
                 email_input.fill(EMAIL)
                 
                 print("✅ 勾选协议条款...")
-                page.locator("text=I have read and agree to the").click(force=True)
+                page.locator("text=I have read and agree to the").first.click(force=True)
                 page.wait_for_timeout(1000) 
                 
                 print("🖱️ 点击 Continue...")
-                page.get_by_role("button", name="Continue").click(force=True)
+                # 【本次修复】：加入了 exact=True，告诉脚本只要纯粹的 Continue，不要带 Google 或 Github 的！
+                page.get_by_role("button", name="Continue", exact=True).click(force=True)
                 page.wait_for_timeout(3000) 
                 
                 print("🔑 正在输入密码...")
@@ -94,7 +92,8 @@ def main():
                 page.get_by_placeholder("Enter your password").fill(PASSWORD)
                 
                 print("🖱️ 点击 Continue (登录)...")
-                page.get_by_role("button", name="Continue").click(force=True)
+                # 【本次修复】：同上，精确匹配
+                page.get_by_role("button", name="Continue", exact=True).click(force=True)
                 
                 print("⏳ 等待登录完毕并跳回主控制台 (超时设为 30 秒)...")
                 page.wait_for_url("**/agent.minimax.io/**", timeout=30000)
@@ -115,7 +114,8 @@ def main():
             print("📸 已保存清理后的主页截图为 dashboard_cleaned.png")
             
             print("🔍 正在查找签到按钮...")
-            checkin_btn = page.locator('button:has-text("Check in for")')
+            # 加上 .first，防止网页里有多个包含 Check in 文本的地方导致报错
+            checkin_btn = page.locator('button:has-text("Check in for")').first
             
             # 如果签到面板没弹出来，尝试暴力点击包含小礼品盒标识的图标
             if not checkin_btn.is_visible():
@@ -140,7 +140,7 @@ def main():
                 points_val = points.group() if points else "未知"
                 
                 print(f"👆 找到签到按钮 [{btn_text}]，准备点击...")
-                checkin_btn.click(force=True) # 同样无视遮挡强制点击签到
+                checkin_btn.click(force=True) 
                 page.wait_for_timeout(4000) 
                 
                 page.screenshot(path="success.png")
