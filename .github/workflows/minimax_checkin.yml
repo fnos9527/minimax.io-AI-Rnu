@@ -2,9 +2,8 @@ name: Minimax Daily Check-in
 
 on:
   schedule:
-    # 每天北京时间早上 9:00 执行 (UTC 时间 1:00)
     - cron: '0 1 * * *'
-  workflow_dispatch: # 允许手动点击按钮运行测试
+  workflow_dispatch:
 
 jobs:
   checkin:
@@ -32,3 +31,11 @@ jobs:
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       run: python checkin.py
+
+    # 新增这一步：无论成功还是失败，都会把脚本运行中拍的截图传上来
+    - name: Upload Screenshots
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: debug-screenshots
+        path: "*.png"
