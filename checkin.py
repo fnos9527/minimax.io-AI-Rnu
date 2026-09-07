@@ -1,6 +1,5 @@
 import os
 import re
-import time
 import requests
 import traceback
 from playwright.sync_api import sync_playwright
@@ -12,19 +11,31 @@ TG_CHAT_ID = os.environ.get('TG_CHAT_ID')
 
 def send_telegram_msg(text):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("未配置 TG 机器人，跳过发送通知")
         return
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}
     try:
         requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"发送 TG 通知失败: {e}")
+    except:
+        pass
+
+def nuke_modals(page):
+    """【黑科技】执行 JS 暴力清除页面上的广告弹窗和隐形遮罩层"""
+    page.evaluate('''() => {
+        // 1. 查找包含 "Try it now" 的按钮，并把整个广告弹窗物理删除
+        const btns = Array.from(document.querySelectorAll('button'));
+        const tryBtn = btns.find(b => b.innerText && b.innerText.includes('Try it now'));
+        if (tryBtn) {
+            const modal = tryBtn.closest('div[class*="modal"], div[class*="dialog"], div[role="dialog"]');
+            if (modal) modal.remove();
+        }
+        // 2. 暴力删除所有可能是遮罩层 (Mask/Overlay) 的元素，防止它们吞掉点击事件
+        document.querySelectorAll('[class*="mask"], [class*="overlay"]').forEach(m => m.remove());
+    }''')
 
 def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        # 保持大分辨率
         context = browser.new_context(
             viewport={'width': 1920, 'height': 1080},
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36'
@@ -35,35 +46,35 @@ def main():
             print("🚀 开始执行 Minimax 自动签到任务...")
             
             # 1. 访问首页
-            print("🌐 正在访问 https://agent.minimax.io/ ...")
+            print("🌐 正在访问主页 https://agent.minimax.io/ ...")
             page.goto("https://agent.minimax.io/")
-            page.wait_for_timeout(6000) # 等待页面和广告加载
-            print(f"📌 当前页面 URL: {page.url}")
+            page.wait_for_timeout(6000)
 
-            # 【新增】尝试按 ESC 键关闭刚进网页时的 H3 活动广告弹窗
-            print("🛡️ 尝试清理遮挡弹窗...")
-            page.keyboard.press("Escape")
+            # 2. 清理未登录状态下的广告弹窗
+            print("🛡️ 正在执行 JS 移除广告弹窗和底层遮罩...")
+            nuke_modals(page)
             page.wait_for_timeout(1000)
 
-            # 【新增】判断主页是否有 Sign in 按钮（主动点击去登录）
-            sign_in_btn = page.locator('text="Sign in"').first
-            if sign_in_btn.is_visible():
-                print("👀 发现 [Sign in] 按钮，说明在游客状态，正在点击进入登录页...")
-                # force=True 表示无视弹窗遮挡，强制点击该按钮
-                sign_in_btn.click(force=True)
-                print("⏳ 等待页面跳转...")
-                page.wait_for_timeout(4000)
-                print(f"📌 跳转后的 URL: {page.url}")
-
-            # 2. 判断是否进入了登录页面 (查找邮箱输入框)
+            # 3. 判断并点击登录
             email_input = page.locator('input[placeholder="Enter your email"]')
-            if email_input.is_visible() or "login" in page.url or "oauth2" in page.url:
+            if not email_input.is_visible():
+                sign_in_btn = page.locator('text="Sign in"').first
+                if sign_in_btn.is_visible():
+                    print("👀 发现 [Sign in] 按钮，正在点击进入登录页...")
+                    sign_in_btn.click() # 因为遮罩被删了，这次点击一定生效
+                    print("⏳ 等待跳转至登录页...")
+                    try:
+                        email_input.wait_for(state="visible", timeout=15000)
+                    except:
+                        pass
+            
+            # 4. 执行登录流程
+            if email_input.is_visible():
                 print("🔑 确认进入登录流程，正在输入邮箱...")
-                email_input.wait_for(state="visible", timeout=10000)
                 email_input.fill(EMAIL)
                 
                 print("✅ 勾选协议条款...")
-                page.locator("text=I have read and agree to the").click()
+                page.locator("text=I have read and agree to the").click(force=True)
                 page.wait_for_timeout(1000) 
                 
                 print("🖱️ 点击 Continue...")
@@ -77,45 +88,62 @@ def main():
                 print("🖱️ 点击 Continue (登录)...")
                 page.get_by_role("button", name="Continue").click()
                 
-                print("⏳ 等待登录完毕并跳回主控制台 (超时设为30秒)...")
+                print("⏳ 等待登录完毕并跳回主控制台 (超时设为 30 秒)...")
                 page.wait_for_url("**/agent.minimax.io/**", timeout=30000)
                 print(f"✅ 登录成功！当前 URL: {page.url}")
             else:
-                print("✅ 未检测到登录框，假设当前已是登录状态...")
+                print("✅ 未检测到邮箱输入框，假设当前已是登录状态...")
 
-            # 3. 寻找签到小部件
+            # 5. 签到流程
             print("⏳ 正在等待主页数据及签到组件加载 (等待 10 秒)...")
             page.wait_for_timeout(10000) 
             
-            # 【新增】登录进来后再次按 ESC，防止又有什么新人引导弹窗遮挡签到按钮
-            page.keyboard.press("Escape")
+            # 再次清理弹窗 (防止登录后又弹一个广告遮挡签到)
+            print("🛡️ 再次清理可能弹出的登录后广告...")
+            nuke_modals(page)
             page.wait_for_timeout(1000)
             
-            page.screenshot(path="dashboard.png") 
-            print("📸 已保存登录后主页截图为 dashboard.png")
+            page.screenshot(path="dashboard_cleaned.png") 
+            print("📸 已保存清理后的主页截图为 dashboard_cleaned.png")
             
             print("🔍 正在查找签到按钮...")
             checkin_btn = page.locator('button:has-text("Check in for")')
             
+            # 如果签到面板没弹出来，尝试暴力点击包含小礼品盒标识的图标
+            if not checkin_btn.is_visible():
+                print("⚠️ 签到面板未自动展开，正在使用 JS 遍历点击可能的小礼品盒...")
+                page.evaluate('''() => {
+                    const allEls = document.querySelectorAll('*');
+                    for(let el of allEls) {
+                        if (el.className && typeof el.className === 'string') {
+                            let c = el.className.toLowerCase();
+                            // 暴力点击类名包含 checkin, gift(礼品) 的所有元素
+                            if (c.includes('checkin') || c.includes('gift') || c.includes('reward')) {
+                                el.click();
+                            }
+                        }
+                    }
+                }''')
+                page.wait_for_timeout(3000) # 给面板弹出动画预留时间
+            
+            # 再次检查签到按钮并领取
             if checkin_btn.is_visible():
                 btn_text = checkin_btn.inner_text()
-                # 提取数字
                 points = re.search(r'\d+', btn_text)
                 points_val = points.group() if points else "未知"
                 
-                print(f"👆 找到签到按钮，准备点击...")
+                print(f"👆 找到签到按钮 [{btn_text}]，准备点击...")
                 checkin_btn.click(force=True)
-                page.wait_for_timeout(4000) # 等待领取成功的提示
+                page.wait_for_timeout(4000) # 等待领取成功动画 
                 
-                # 截取领取成功的图
                 page.screenshot(path="success.png")
                 
                 msg = f"🎉 <b>Minimax 签到成功</b>\n\n💰 <b>获得积分:</b> {points_val}\n⏰ <b>状态:</b> 今日已完成领取"
                 print(msg)
                 send_telegram_msg(msg)
             else:
-                print("⚠️ 未找到签到按钮！")
-                msg = "⚠️ <b>Minimax 签到异常</b>\n未找到签到按钮，可能是今天已经签过，或者小礼品盒被折叠没有自动弹出来。请去 Actions 下载截图 dashboard.png 查看。"
+                print("⚠️ 仍然未找到签到按钮！")
+                msg = "⚠️ <b>Minimax 签到异常</b>\n未找到签到面板。可能是:\n1. 今天已经签到过，按钮隐藏了\n2. 小礼品盒由于版本更新改了代码\n请去 Actions 下载截图 dashboard_cleaned.png 查看。"
                 send_telegram_msg(msg)
 
         except Exception as e:
