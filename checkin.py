@@ -55,17 +55,16 @@ def main():
             page.goto("https://agent.minimax.io/")
             page.wait_for_timeout(6000)
 
-            # 2. 清理未登录状态下的广告弹窗
             print("🛡️ 正在执行 JS 移除广告弹窗和底层遮罩...")
             nuke_modals(page)
             page.wait_for_timeout(1000)
 
-            # 3. 判断并点击登录
+            # 2. 判断并点击登录
             email_input = page.locator('input[placeholder="Enter your email"]')
             if not email_input.is_visible():
                 sign_in_btn = page.locator('text="Sign in"').first
                 if sign_in_btn.is_visible():
-                    print("👀 发现 [Sign in] 按钮，正在使用无视遮挡(force=True)进行强制点击...")
+                    print("👀 发现 [Sign in] 按钮，正在强制点击...")
                     sign_in_btn.click(force=True) 
                     print("⏳ 等待跳转至登录页...")
                     try:
@@ -73,36 +72,49 @@ def main():
                     except:
                         pass
             
-            # 4. 执行登录流程
+            # 3. 执行登录流程
             if email_input.is_visible():
                 print("🔑 确认进入登录流程，正在输入邮箱...")
                 email_input.fill(EMAIL)
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(1000)
                 
-                print("✅ 正在强行勾选协议条款...")
-                # 方案 A: 尝试用 Playwright 点击包含文字的标签 (取最后一个即可视元素)
-                try:
-                    page.locator('text=I have read and agree').last.click(force=True)
-                except:
-                    pass
+                print("✅ 正在强行勾选协议条款 (三管齐下)...")
                 
-                # 方案 B: 无论方案A成没成功，都注入 JS 执行降维打击，强制触发选中
+                # 【杀招 A】：深度 DOM 遍历，精准找到最底层的文字节点并疯狂点击它和它周围的元素
                 page.evaluate('''() => {
-                    // 1. 找到该文字，并点击它的外层父容器(通常是包裹文字和小圆圈的 label/div)
-                    const els = Array.from(document.querySelectorAll('*'));
-                    const agreeEl = els.find(el => el.textContent && el.textContent.includes('I have read and agree'));
-                    if (agreeEl && agreeEl.parentElement) {
-                        agreeEl.parentElement.click();
+                    // 点击所有复选框语义元素
+                    document.querySelectorAll('[role="checkbox"], [role="radio"]').forEach(el => el.click());
+                    
+                    // 寻找包含文本的最底层元素
+                    const all = document.querySelectorAll('*');
+                    for (let el of all) {
+                        if (el.textContent && el.textContent.includes('I have read and agree')) {
+                            // 确保它没有子元素也包含该文本，说明它是最底层的 span/label
+                            let childMatch = Array.from(el.children).some(c => c.textContent && c.textContent.includes('I have read and agree'));
+                            if (!childMatch) {
+                                el.click(); // 点文字
+                                if(el.parentElement) el.parentElement.click(); // 点父节点 label
+                                if(el.previousElementSibling) el.previousElementSibling.click(); // 点可能存在的左侧小圆圈 div
+                            }
+                        }
                     }
-                    // 2. 暴力寻找页面底层的 checkbox/radio 并修改状态为选中
-                    const inputs = document.querySelectorAll('input[type="checkbox"], input[type="radio"]');
-                    inputs.forEach(i => {
-                        i.checked = true;
-                        i.click();
-                        i.dispatchEvent(new Event('change', { bubbles: true }));
-                    });
                 }''')
-                page.wait_for_timeout(1500) 
+                page.wait_for_timeout(1000)
+                
+                # 【杀招 B】：Playwright 模拟真人鼠标，物理点击文字左侧偏 15 像素的地方（直击小圆圈心脏）
+                try:
+                    box = page.locator('text="I have read and agree"').first.bounding_box()
+                    if box:
+                        # 瞄准文字左侧 15px 的位置（圆圈所在处）进行两连击
+                        page.mouse.click(box["x"] - 15, box["y"] + box["height"] / 2)
+                        page.mouse.click(box["x"] - 5, box["y"] + box["height"] / 2)
+                except Exception as e:
+                    print(f"坐标点击偏移失败，跳过: {e}")
+
+                page.wait_for_timeout(1000)
+                
+                # 留个案发现场，如果还是没勾上，这张图能让我们看清楚
+                page.screenshot(path="debug_checkbox.png") 
                 
                 print("🖱️ 点击 Continue...")
                 page.get_by_role("button", name="Continue", exact=True).click(force=True)
@@ -121,7 +133,7 @@ def main():
             else:
                 print("✅ 未检测到邮箱输入框，假设当前已是登录状态...")
 
-            # 5. 签到流程
+            # 4. 签到流程
             print("⏳ 正在等待主页数据及签到组件加载 (等待 10 秒)...")
             page.wait_for_timeout(10000) 
             
@@ -130,7 +142,6 @@ def main():
             page.wait_for_timeout(1000)
             
             page.screenshot(path="dashboard_cleaned.png") 
-            print("📸 已保存清理后的主页截图为 dashboard_cleaned.png")
             
             print("🔍 正在查找签到按钮...")
             checkin_btn = page.locator('button:has-text("Check in for")').first
@@ -166,13 +177,12 @@ def main():
                 send_telegram_msg(msg)
             else:
                 print("⚠️ 仍然未找到签到按钮！")
-                msg = "⚠️ <b>Minimax 签到异常</b>\n未找到签到面板。可能是:\n1. 今天已经签到过，按钮隐藏了\n2. 小礼品盒由于版本更新改了代码\n请去 Actions 下载截图 dashboard_cleaned.png 查看。"
+                msg = "⚠️ <b>Minimax 签到异常</b>\n未找到签到面板。可能是:\n1. 今天已经签到过\n2. 小礼品盒被折叠\n请去 Actions 下载截图 dashboard_cleaned.png 查看。"
                 send_telegram_msg(msg)
 
         except Exception as e:
             print(f"❌ 运行发生错误: {str(e)}")
             print(traceback.format_exc())
-            print("📸 正在保存错误现场截图到 error.png...")
             try:
                 page.screenshot(path="error.png")
             except:
