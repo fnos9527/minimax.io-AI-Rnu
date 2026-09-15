@@ -78,42 +78,25 @@ def main():
                 email_input.fill(EMAIL)
                 page.wait_for_timeout(1000)
                 
-                print("✅ 正在强行勾选协议条款 (三管齐下)...")
-                
-                # 【杀招 A】：深度 DOM 遍历，精准找到最底层的文字节点并疯狂点击它和它周围的元素
+                # 协议默认已勾选，这里仅做兜底尝试，不再等待坐标点击（避免浪费 30 秒）
+                print("✅ 正在尝试勾选协议条款（兜底，若默认已勾选则跳过）...")
                 page.evaluate('''() => {
-                    // 点击所有复选框语义元素
                     document.querySelectorAll('[role="checkbox"], [role="radio"]').forEach(el => el.click());
-                    
-                    // 寻找包含文本的最底层元素
                     const all = document.querySelectorAll('*');
                     for (let el of all) {
                         if (el.textContent && el.textContent.includes('I have read and agree')) {
-                            // 确保它没有子元素也包含该文本，说明它是最底层的 span/label
                             let childMatch = Array.from(el.children).some(c => c.textContent && c.textContent.includes('I have read and agree'));
                             if (!childMatch) {
-                                el.click(); // 点文字
-                                if(el.parentElement) el.parentElement.click(); // 点父节点 label
-                                if(el.previousElementSibling) el.previousElementSibling.click(); // 点可能存在的左侧小圆圈 div
+                                el.click();
+                                if(el.parentElement) el.parentElement.click();
+                                if(el.previousElementSibling) el.previousElementSibling.click();
                             }
                         }
                     }
                 }''')
-                page.wait_for_timeout(1000)
+                page.wait_for_timeout(500)
                 
-                # 【杀招 B】：Playwright 模拟真人鼠标，物理点击文字左侧偏 15 像素的地方（直击小圆圈心脏）
-                try:
-                    box = page.locator('text="I have read and agree"').first.bounding_box()
-                    if box:
-                        # 瞄准文字左侧 15px 的位置（圆圈所在处）进行两连击
-                        page.mouse.click(box["x"] - 15, box["y"] + box["height"] / 2)
-                        page.mouse.click(box["x"] - 5, box["y"] + box["height"] / 2)
-                except Exception as e:
-                    print(f"坐标点击偏移失败，跳过: {e}")
-
-                page.wait_for_timeout(1000)
-                
-                # 留个案发现场，如果还是没勾上，这张图能让我们看清楚
+                # 留个案发现场
                 page.screenshot(path="debug_checkbox.png") 
                 
                 print("🖱️ 点击 Continue...")
@@ -133,21 +116,36 @@ def main():
             else:
                 print("✅ 未检测到邮箱输入框，假设当前已是登录状态...")
 
-            # 4. 签到流程
-            print("⏳ 正在等待主页数据及签到组件加载 (等待 10 秒)...")
-            page.wait_for_timeout(10000) 
-            
-            print("🛡️ 再次清理可能弹出的登录后广告...")
-            nuke_modals(page)
-            page.wait_for_timeout(1000)
-            
-            page.screenshot(path="dashboard_cleaned.png") 
-            
-            print("🔍 正在查找签到按钮...")
-            checkin_btn = page.locator('button:has-text("Check in for")').first
-            
-            if not checkin_btn.is_visible():
-                print("⚠️ 签到面板未自动展开，正在使用 JS 遍历点击可能的小礼品盒...")
+            # 4. 签到流程 —— 用轮询代替固定等待，最长等 40 秒，并支持刷新重试
+            print("⏳ 正在轮询等待签到组件加载 (最长 40 秒)...")
+            checkin_btn = None
+            for i in range(8):  # 8 * 5s = 40s
+                page.wait_for_timeout(5000)
+                nuke_modals(page)  # 每一轮都清理一次新冒出来的弹窗/遮罩
+                btn = page.locator('button:has-text("Check in for")').first
+                if btn.is_visible():
+                    checkin_btn = btn
+                    print(f"✅ 第 {i+1} 次轮询检测到签到按钮")
+                    break
+                print(f"⌛ 第 {i+1}/8 次未检测到签到面板，继续等待...")
+
+            page.screenshot(path="dashboard_cleaned.png")
+
+            # 仍未找到就刷新页面重试一次
+            if checkin_btn is None:
+                print("🔄 40 秒内未出现签到面板，尝试刷新页面重试...")
+                page.reload()
+                page.wait_for_timeout(8000)
+                nuke_modals(page)
+                page.wait_for_timeout(2000)
+                btn = page.locator('button:has-text("Check in for")').first
+                if btn.is_visible():
+                    checkin_btn = btn
+                    print("✅ 刷新后检测到签到按钮")
+                page.screenshot(path="dashboard_after_reload.png")
+
+            if checkin_btn is None:
+                print("⚠️ 刷新后依然未找到，使用 JS 遍历点击可能的小礼品盒（兜底）...")
                 page.evaluate('''() => {
                     const allEls = document.querySelectorAll('*');
                     for(let el of allEls) {
@@ -160,8 +158,11 @@ def main():
                     }
                 }''')
                 page.wait_for_timeout(3000)
-            
-            if checkin_btn.is_visible():
+                btn = page.locator('button:has-text("Check in for")').first
+                if btn.is_visible():
+                    checkin_btn = btn
+
+            if checkin_btn is not None and checkin_btn.is_visible():
                 btn_text = checkin_btn.inner_text()
                 points = re.search(r'\d+', btn_text)
                 points_val = points.group() if points else "未知"
@@ -177,7 +178,7 @@ def main():
                 send_telegram_msg(msg)
             else:
                 print("⚠️ 仍然未找到签到按钮！")
-                msg = "⚠️ <b>Minimax 签到异常</b>\n未找到签到面板。可能是:\n1. 今天已经签到过\n2. 小礼品盒被折叠\n请去 Actions 下载截图 dashboard_cleaned.png 查看。"
+                msg = "⚠️ <b>Minimax 签到异常</b>\n未找到签到面板。可能是:\n1. 今天已经签到过\n2. 小礼品盒被折叠\n3. 页面加载异常\n请去 Actions 下载截图 dashboard_cleaned.png / dashboard_after_reload.png 查看。"
                 send_telegram_msg(msg)
 
         except Exception as e:
