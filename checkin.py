@@ -9,9 +9,9 @@ PASSWORD = os.environ.get('MINIMAX_PASSWORD')
 TG_BOT_TOKEN = os.environ.get('TG_BOT_TOKEN')
 TG_CHAT_ID = os.environ.get('TG_CHAT_ID')
 
-MAX_ROUNDS = 3          # 最多轮询/刷新的轮次
-POLL_INTERVAL_MS = 5000  # 每轮内部检测按钮的间隔
-POLLS_PER_ROUND = 4      # 每轮内部检测次数 (4 * 5s = 20s)
+MAX_ROUNDS = 3
+POLL_INTERVAL_MS = 5000
+POLLS_PER_ROUND = 4  # 4 * 5s = 20s 每轮
 
 
 def send_telegram_msg(text):
@@ -25,8 +25,11 @@ def send_telegram_msg(text):
         pass
 
 
-def nuke_modals(page):
-    """暴力清除页面上的广告弹窗和所有隐形遮罩层"""
+def nuke_ad_modal_only(page):
+    """
+    只精准清除 'Try it now' 那种广告弹窗，不再无差别删除
+    class 含 mask/overlay/blanket 的元素，避免误删签到面板本身。
+    """
     page.evaluate('''() => {
         const btns = Array.from(document.querySelectorAll('button'));
         const tryBtn = btns.find(b => b.innerText && b.innerText.includes('Try it now'));
@@ -34,6 +37,17 @@ def nuke_modals(page):
             const modal = tryBtn.closest('div[class*="modal"], div[class*="dialog"], div[role="dialog"]');
             if (modal) modal.remove();
         }
+    }''')
+
+
+def nuke_generic_overlays_safe(page):
+    """
+    清除通用的 mask/overlay/blanket 类型元素，但加一道白名单保护：
+    如果该元素（或其子孙）文本中包含签到相关关键词，则跳过不删，
+    防止把 Daily check-in 面板自身的外层容器当成广告遮罩误删。
+    """
+    page.evaluate('''() => {
+        const protectedKeywords = ['check-in', 'check in', 'daily check', 'streak'];
         const badElements = [
             '[class*="mask"]',
             '[class*="overlay"]',
@@ -41,7 +55,13 @@ def nuke_modals(page):
             '[data-connect-mobile-hint-dismiss-boundary]',
             'div[style*="z-index: 9999"]'
         ];
-        document.querySelectorAll(badElements.join(', ')).forEach(m => m.remove());
+        document.querySelectorAll(badElements.join(', ')).forEach(el => {
+            const text = (el.innerText || '').toLowerCase();
+            const isProtected = protectedKeywords.some(k => text.includes(k));
+            if (!isProtected) {
+                el.remove();
+            }
+        });
     }''')
 
 
@@ -51,8 +71,11 @@ def do_login(page):
     page.goto("https://agent.minimax.io/")
     page.wait_for_timeout(6000)
 
-    print("🛡️ 正在执行 JS 移除广告弹窗和底层遮罩...")
-    nuke_modals(page)
+    print("🛡️ 正在清除广告弹窗 (Try it now)...")
+    nuke_ad_modal_only(page)
+    page.wait_for_timeout(500)
+    print("🛡️ 正在清除通用遮罩层 (已加白名单保护签到面板)...")
+    nuke_generic_overlays_safe(page)
     page.wait_for_timeout(1000)
 
     email_input = page.locator('input[placeholder="Enter your email"]')
@@ -120,15 +143,18 @@ def check_panel_loaded(page):
 def poll_for_checkin_button(page, round_no):
     """
     在当前页面轮询检测签到按钮。
+    只在必要时清理广告弹窗，且清理时带白名单保护，不再每次轮询都无差别清场。
     返回 (status, checkin_btn)
-    status 取值: "found"（找到按钮，可点击）/ "already_done"（面板加载了但按钮不在，判定已签到）/ "not_loaded"（面板都没加载出来）
+    status: "found" / "already_done" / "not_loaded"
     """
     checkin_btn = None
     panel_seen = False
 
     for i in range(POLLS_PER_ROUND):
         page.wait_for_timeout(POLL_INTERVAL_MS)
-        nuke_modals(page)
+
+        # 只精准清广告弹窗，不动通用遮罩，避免误删刚渲染出来的签到面板
+        nuke_ad_modal_only(page)
 
         btn = page.locator('button:has-text("Check in for")').first
         if btn.is_visible():
@@ -141,18 +167,19 @@ def poll_for_checkin_button(page, round_no):
 
         print(f"⌛ [第 {round_no} 轮] 第 {i+1}/{POLLS_PER_ROUND} 次未检测到签到按钮，继续等待...")
 
+        # 只有当面板确实还没出现、且怀疑被通用遮罩挡住时，才做一次带白名单保护的清理
+        if not panel_seen:
+            nuke_generic_overlays_safe(page)
+
     page.screenshot(path=f"dashboard_round{round_no}.png")
 
     if checkin_btn is not None:
         return "found", checkin_btn
 
-    # 按钮没找到，再确认一次面板是否已经加载（哪怕之前没抓到）
     if not panel_seen:
         panel_seen = check_panel_loaded(page)
 
     if panel_seen:
-        # 面板已经渲染出来了，只是签到按钮不在 —— 大概率是已经签到过
-        # （很可能是这一轮或之前某一轮的操作已经生效，只是没被脚本正确捕捉到）
         return "already_done", None
 
     return "not_loaded", None
@@ -167,8 +194,6 @@ def main():
         )
         page = context.new_page()
 
-        final_status = "not_loaded"
-
         try:
             for round_no in range(1, MAX_ROUNDS + 1):
                 print(f"🚀 ===== 第 {round_no} 轮开始 =====")
@@ -179,11 +204,10 @@ def main():
                     print("🔄 不重新登录，直接刷新签到页面...")
                     page.reload()
                     page.wait_for_timeout(6000)
-                    nuke_modals(page)
+                    nuke_ad_modal_only(page)
                     page.wait_for_timeout(1000)
 
                 status, checkin_btn = poll_for_checkin_button(page, round_no)
-                final_status = status
 
                 if status == "found":
                     btn_text = checkin_btn.inner_text()
@@ -225,7 +249,6 @@ def main():
                         print("➡️ 准备进入下一轮，刷新页面重试...")
                     continue
 
-            # 三轮都是 not_loaded，才算真正失败
             print("❌ 已重试 3 轮，签到面板始终未能加载。")
             msg = (
                 f"⚠️ <b>Minimax 签到异常</b>\n\n"
