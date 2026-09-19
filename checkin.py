@@ -25,11 +25,16 @@ def send_telegram_msg(text):
         pass
 
 
+def extract_points(text):
+    """从按钮文案中提取积分数字，支持带千分位逗号，如 '1,000' -> '1000'"""
+    match = re.search(r'[\d,]+', text)
+    if not match:
+        return "未知"
+    return match.group().replace(',', '')
+
+
 def nuke_ad_modal_only(page):
-    """
-    只精准清除 'Try it now' 那种广告弹窗，不再无差别删除
-    class 含 mask/overlay/blanket 的元素，避免误删签到面板本身。
-    """
+    """只精准清除 'Try it now' 那种广告弹窗，不再无差别删除通用遮罩，避免误删签到面板本身。"""
     page.evaluate('''() => {
         const btns = Array.from(document.querySelectorAll('button'));
         const tryBtn = btns.find(b => b.innerText && b.innerText.includes('Try it now'));
@@ -41,11 +46,7 @@ def nuke_ad_modal_only(page):
 
 
 def nuke_generic_overlays_safe(page):
-    """
-    清除通用的 mask/overlay/blanket 类型元素，但加一道白名单保护：
-    如果该元素（或其子孙）文本中包含签到相关关键词，则跳过不删，
-    防止把 Daily check-in 面板自身的外层容器当成广告遮罩误删。
-    """
+    """清除通用遮罩，但跳过包含签到相关关键词的元素，避免误删签到面板。"""
     page.evaluate('''() => {
         const protectedKeywords = ['check-in', 'check in', 'daily check', 'streak'];
         const badElements = [
@@ -143,7 +144,6 @@ def check_panel_loaded(page):
 def poll_for_checkin_button(page, round_no):
     """
     在当前页面轮询检测签到按钮。
-    只在必要时清理广告弹窗，且清理时带白名单保护，不再每次轮询都无差别清场。
     返回 (status, checkin_btn)
     status: "found" / "already_done" / "not_loaded"
     """
@@ -153,7 +153,6 @@ def poll_for_checkin_button(page, round_no):
     for i in range(POLLS_PER_ROUND):
         page.wait_for_timeout(POLL_INTERVAL_MS)
 
-        # 只精准清广告弹窗，不动通用遮罩，避免误删刚渲染出来的签到面板
         nuke_ad_modal_only(page)
 
         btn = page.locator('button:has-text("Check in for")').first
@@ -167,7 +166,6 @@ def poll_for_checkin_button(page, round_no):
 
         print(f"⌛ [第 {round_no} 轮] 第 {i+1}/{POLLS_PER_ROUND} 次未检测到签到按钮，继续等待...")
 
-        # 只有当面板确实还没出现、且怀疑被通用遮罩挡住时，才做一次带白名单保护的清理
         if not panel_seen:
             nuke_generic_overlays_safe(page)
 
@@ -185,6 +183,59 @@ def poll_for_checkin_button(page, round_no):
     return "not_loaded", None
 
 
+def click_checkin_and_verify(page, checkin_btn, round_no):
+    """
+    点击签到按钮，并在点击后验证是否真正生效。
+    返回 (success: bool, points_val: str)
+    """
+    btn_text_before = checkin_btn.inner_text().strip()
+    points_val = extract_points(btn_text_before)
+
+    print(f"👆 [第 {round_no} 轮] 找到签到按钮 [{btn_text_before}]，准备点击...")
+
+    # 优先用更接近真人操作的点击方式：滚动到可见区域 -> 悬停 -> 正常点击
+    clicked_normally = False
+    try:
+        checkin_btn.scroll_into_view_if_needed()
+        checkin_btn.hover()
+        page.wait_for_timeout(300)
+        checkin_btn.click(timeout=5000)
+        clicked_normally = True
+    except Exception as e:
+        print(f"⚠️ 正常点击失败 ({e})，改用 force 点击兜底...")
+
+    if not clicked_normally:
+        try:
+            checkin_btn.click(force=True)
+        except Exception as e:
+            print(f"❌ force 点击也失败: {e}")
+
+    # 等待页面响应，并清理可能新弹出的广告，再截图确认
+    page.wait_for_timeout(3000)
+    nuke_ad_modal_only(page)
+    page.wait_for_timeout(2000)
+    page.screenshot(path=f"after_click_round{round_no}.png")
+
+    # 验证：重新查找按钮，如果文案和点击前完全一样，说明点击大概率没生效
+    btn_after = page.locator('button:has-text("Check in for")').first
+    still_same = False
+    if btn_after.is_visible():
+        try:
+            btn_text_after = btn_after.inner_text().strip()
+            if btn_text_after == btn_text_before:
+                still_same = True
+        except:
+            pass
+
+    success = not still_same
+    if not success:
+        print(f"⚠️ [第 {round_no} 轮] 点击后按钮文案未发生变化，判定点击未真正生效。")
+    else:
+        print(f"✅ [第 {round_no} 轮] 点击后按钮状态已变化，判定签到成功。")
+
+    return success, points_val
+
+
 def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -193,6 +244,8 @@ def main():
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36'
         )
         page = context.new_page()
+
+        click_attempted_but_failed = False
 
         try:
             for round_no in range(1, MAX_ROUNDS + 1):
@@ -210,24 +263,23 @@ def main():
                 status, checkin_btn = poll_for_checkin_button(page, round_no)
 
                 if status == "found":
-                    btn_text = checkin_btn.inner_text()
-                    points = re.search(r'\d+', btn_text)
-                    points_val = points.group() if points else "未知"
+                    success, points_val = click_checkin_and_verify(page, checkin_btn, round_no)
 
-                    print(f"👆 [第 {round_no} 轮] 找到签到按钮 [{btn_text}]，准备点击...")
-                    checkin_btn.click(force=True)
-                    page.wait_for_timeout(4000)
-                    page.screenshot(path=f"success_round{round_no}.png")
-
-                    msg = (
-                        f"🎉 <b>Minimax 签到成功</b>\n\n"
-                        f"💰 <b>获得积分:</b> {points_val}\n"
-                        f"🔁 <b>轮次:</b> 第 {round_no} 轮\n"
-                        f"⏰ <b>状态:</b> 今日已完成领取"
-                    )
-                    print(msg)
-                    send_telegram_msg(msg)
-                    return
+                    if success:
+                        msg = (
+                            f"🎉 <b>Minimax 签到成功</b>\n\n"
+                            f"💰 <b>获得积分:</b> {points_val}\n"
+                            f"🔁 <b>轮次:</b> 第 {round_no} 轮\n"
+                            f"⏰ <b>状态:</b> 今日已完成领取"
+                        )
+                        print(msg)
+                        send_telegram_msg(msg)
+                        return
+                    else:
+                        click_attempted_but_failed = True
+                        if round_no < MAX_ROUNDS:
+                            print("➡️ 点击未生效，进入下一轮刷新重试...")
+                        continue
 
                 elif status == "already_done":
                     print(f"ℹ️ [第 {round_no} 轮] 签到面板已加载但未找到签到按钮，判定为今日已签到。")
@@ -249,16 +301,25 @@ def main():
                         print("➡️ 准备进入下一轮，刷新页面重试...")
                     continue
 
-            print("❌ 已重试 3 轮，签到面板始终未能加载。")
-            msg = (
-                f"⚠️ <b>Minimax 签到异常</b>\n\n"
-                f"已连续尝试 {MAX_ROUNDS} 轮，签到面板始终未能加载出来。\n"
-                f"可能原因:\n"
-                f"1. 网站页面结构发生变化\n"
-                f"2. 登录状态异常\n"
-                f"3. 网络异常\n"
-                f"请去 Actions 下载各轮次截图查看详情。"
-            )
+            print("❌ 已重试 3 轮，均未能确认签到成功。")
+            if click_attempted_but_failed:
+                msg = (
+                    f"⚠️ <b>Minimax 签到异常</b>\n\n"
+                    f"已连续尝试 {MAX_ROUNDS} 轮，虽然找到了签到按钮并尝试点击，"
+                    f"但点击后按钮状态始终没有变化，判定签到未真正生效。\n"
+                    f"请去 Actions 下载 after_click_roundN.png 截图查看详情，"
+                    f"也可以手动登录网站确认积分是否已到账。"
+                )
+            else:
+                msg = (
+                    f"⚠️ <b>Minimax 签到异常</b>\n\n"
+                    f"已连续尝试 {MAX_ROUNDS} 轮，签到面板始终未能加载出来。\n"
+                    f"可能原因:\n"
+                    f"1. 网站页面结构发生变化\n"
+                    f"2. 登录状态异常\n"
+                    f"3. 网络异常\n"
+                    f"请去 Actions 下载各轮次截图查看详情。"
+                )
             send_telegram_msg(msg)
 
         except Exception as e:
