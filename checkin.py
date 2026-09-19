@@ -34,7 +34,7 @@ def extract_points(text):
 
 
 def nuke_ad_modal_only(page):
-    """只精准清除 'Try it now' 那种广告弹窗，不再无差别删除通用遮罩，避免误删签到面板本身。"""
+    """精准清除 'Try it now' 那种带明确按钮的广告弹窗。"""
     page.evaluate('''() => {
         const btns = Array.from(document.querySelectorAll('button'));
         const tryBtn = btns.find(b => b.innerText && b.innerText.includes('Try it now'));
@@ -66,17 +66,42 @@ def nuke_generic_overlays_safe(page):
     }''')
 
 
+def dismiss_blocking_dialogs(page):
+    """
+    通用清除任何 role="dialog" 的弹窗/遮罩（包括看不见的全屏透明公告层）。
+    这类弹窗即使没有明显按钮、内容不可见，也会用 fixed inset-0 + 高 z-index
+    拦截整个页面的点击事件，必须在点击签到按钮前彻底清掉。
+    仍然保留白名单保护，避免误删签到面板本身。
+    """
+    page.evaluate('''() => {
+        const protectedKeywords = ['check-in', 'check in', 'daily check', 'streak'];
+        document.querySelectorAll('div[role="dialog"], div[aria-modal="true"]').forEach(el => {
+            const label = (el.getAttribute('aria-label') || '').toLowerCase();
+            const text = (el.innerText || '').toLowerCase();
+            const combined = label + ' ' + text;
+            const isProtected = protectedKeywords.some(k => combined.includes(k));
+            if (!isProtected) {
+                el.remove();
+            }
+        });
+    }''')
+
+
+def clear_all_blockers(page):
+    """一次性把三类清理都跑一遍，点击前调用最保险。"""
+    nuke_ad_modal_only(page)
+    nuke_generic_overlays_safe(page)
+    dismiss_blocking_dialogs(page)
+
+
 def do_login(page):
     """执行一次完整的登录流程（只在第 1 轮调用一次）"""
     print("🌐 正在访问主页 https://agent.minimax.io/ ...")
     page.goto("https://agent.minimax.io/")
     page.wait_for_timeout(6000)
 
-    print("🛡️ 正在清除广告弹窗 (Try it now)...")
-    nuke_ad_modal_only(page)
-    page.wait_for_timeout(500)
-    print("🛡️ 正在清除通用遮罩层 (已加白名单保护签到面板)...")
-    nuke_generic_overlays_safe(page)
+    print("🛡️ 正在清理广告弹窗 / 公告遮罩...")
+    clear_all_blockers(page)
     page.wait_for_timeout(1000)
 
     email_input = page.locator('input[placeholder="Enter your email"]')
@@ -186,6 +211,7 @@ def poll_for_checkin_button(page, round_no):
 def click_checkin_and_verify(page, checkin_btn, round_no):
     """
     点击签到按钮，并在点击后验证是否真正生效。
+    点击前先彻底清除所有可能拦截点击事件的弹窗/遮罩（包括不可见的全屏公告层）。
     返回 (success: bool, points_val: str)
     """
     btn_text_before = checkin_btn.inner_text().strip()
@@ -193,26 +219,33 @@ def click_checkin_and_verify(page, checkin_btn, round_no):
 
     print(f"👆 [第 {round_no} 轮] 找到签到按钮 [{btn_text_before}]，准备点击...")
 
-    # 优先用更接近真人操作的点击方式：滚动到可见区域 -> 悬停 -> 正常点击
+    # 点击前先彻底清理一遍拦截层，尤其是不可见的全屏 role=dialog 公告弹窗
+    print("🧹 点击前先清除所有可能拦截点击的弹窗/遮罩...")
+    clear_all_blockers(page)
+    page.wait_for_timeout(500)
+
     clicked_normally = False
     try:
-        checkin_btn.scroll_into_view_if_needed()
-        checkin_btn.hover()
+        checkin_btn.scroll_into_view_if_needed(timeout=5000)
+        checkin_btn.hover(timeout=5000)
         page.wait_for_timeout(300)
         checkin_btn.click(timeout=5000)
         clicked_normally = True
     except Exception as e:
-        print(f"⚠️ 正常点击失败 ({e})，改用 force 点击兜底...")
+        print(f"⚠️ 正常点击失败 ({str(e)[:200]})，再清理一次遮罩后改用 force 点击兜底...")
+        # 再清一次，防止点击过程中弹窗又刷新出现
+        clear_all_blockers(page)
+        page.wait_for_timeout(500)
 
     if not clicked_normally:
         try:
-            checkin_btn.click(force=True)
+            checkin_btn.click(force=True, timeout=5000)
         except Exception as e:
-            print(f"❌ force 点击也失败: {e}")
+            print(f"❌ force 点击也失败: {str(e)[:200]}")
 
-    # 等待页面响应，并清理可能新弹出的广告，再截图确认
+    # 等待页面响应，再次清理，然后截图确认
     page.wait_for_timeout(3000)
-    nuke_ad_modal_only(page)
+    clear_all_blockers(page)
     page.wait_for_timeout(2000)
     page.screenshot(path=f"after_click_round{round_no}.png")
 
@@ -257,7 +290,7 @@ def main():
                     print("🔄 不重新登录，直接刷新签到页面...")
                     page.reload()
                     page.wait_for_timeout(6000)
-                    nuke_ad_modal_only(page)
+                    clear_all_blockers(page)
                     page.wait_for_timeout(1000)
 
                 status, checkin_btn = poll_for_checkin_button(page, round_no)
