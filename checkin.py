@@ -34,7 +34,11 @@ def extract_points(text):
 
 
 def nuke_ad_modal_only(page):
-    """精准清除 'Try it now' 那种带明确按钮的广告弹窗。"""
+    """
+    精准清除 'Try it now' 那种带明确按钮文案的广告弹窗。
+    这里是唯一保留的"主动删 DOM"操作，因为它用具体的按钮文字精确匹配，
+    误删真正业务面板（比如签到面板）的概率极低。
+    """
     page.evaluate('''() => {
         const btns = Array.from(document.querySelectorAll('button'));
         const tryBtn = btns.find(b => b.innerText && b.innerText.includes('Try it now'));
@@ -45,53 +49,46 @@ def nuke_ad_modal_only(page):
     }''')
 
 
-def nuke_generic_overlays_safe(page):
-    """清除通用遮罩，但跳过包含签到相关关键词的元素，避免误删签到面板。"""
-    page.evaluate('''() => {
-        const protectedKeywords = ['check-in', 'check in', 'daily check', 'streak'];
-        const badElements = [
-            '[class*="mask"]',
-            '[class*="overlay"]',
-            '[class*="blanket"]',
-            '[data-connect-mobile-hint-dismiss-boundary]',
-            'div[style*="z-index: 9999"]'
-        ];
-        document.querySelectorAll(badElements.join(', ')).forEach(el => {
-            const text = (el.innerText || '').toLowerCase();
-            const isProtected = protectedKeywords.some(k => text.includes(k));
-            if (!isProtected) {
-                el.remove();
-            }
-        });
-    }''')
+# 说明：原来这里还有 nuke_generic_overlays_safe() 和 dismiss_blocking_dialogs()
+# 两个函数，它们会用 [class*="mask"] / [class*="overlay"] / div[role="dialog"]
+# 这种非常宽泛的选择器去批量删除元素。
+#
+# 问题在于：很多前端组件库（Ant Design / MUI 等）的正常业务弹层
+# （比如签到面板本身如果是用 Drawer/Modal/Dialog 组件渲染的）
+# 也会用到 mask / overlay / role="dialog" 这些通用类名或属性，
+# 并不是只有广告弹窗才用。白名单关键词判断又依赖 innerText，
+# 如果面板还在异步加载、文字还没渲染出来，也会被误判为"不受保护"而删除。
+#
+# 这就导致真正的签到面板可能在还没来得及显示签到按钮之前，
+# 就被这两个"清理函数"连同外层容器一起删掉了，
+# 于是无论怎么轮询等待，都再也等不到签到按钮。
+#
+# 因此这两个函数已被移除调用（保留精确匹配的 nuke_ad_modal_only 即可），
+# 页面结构不再被脚本主动破坏。
 
 
-def dismiss_blocking_dialogs(page):
+def try_close_obvious_ad_by_click(page):
     """
-    通用清除任何 role="dialog" 的弹窗/遮罩（包括看不见的全屏透明公告层）。
-    这类弹窗即使没有明显按钮、内容不可见，也会用 fixed inset-0 + 高 z-index
-    拦截整个页面的点击事件，必须在点击签到按钮前彻底清掉。
-    仍然保留白名单保护，避免误删签到面板本身。
+    不删除任何 DOM，只是尝试"点击"明显的广告关闭按钮（× / Close / 关闭 / Got it 等），
+    这类关闭按钮通常只会隐藏广告本身，不会误伤其他元素。
+    找不到就直接跳过，不做任何破坏性操作。
     """
-    page.evaluate('''() => {
-        const protectedKeywords = ['check-in', 'check in', 'daily check', 'streak'];
-        document.querySelectorAll('div[role="dialog"], div[aria-modal="true"]').forEach(el => {
-            const label = (el.getAttribute('aria-label') || '').toLowerCase();
-            const text = (el.innerText || '').toLowerCase();
-            const combined = label + ' ' + text;
-            const isProtected = protectedKeywords.some(k => combined.includes(k));
-            if (!isProtected) {
-                el.remove();
+    try:
+        page.evaluate('''() => {
+            const candidates = Array.from(document.querySelectorAll(
+                'button, [role="button"], span, div'
+            )).filter(el => {
+                const t = (el.innerText || '').trim();
+                return t === '×' || t === 'X' || t.toLowerCase() === 'close' ||
+                       t.toLowerCase() === 'got it' || t.toLowerCase() === 'dismiss';
+            });
+            // 只点最上层（z-index 最高）附近、明显是关闭按钮的第一个，避免乱点
+            if (candidates.length > 0) {
+                candidates[0].click();
             }
-        });
-    }''')
-
-
-def clear_all_blockers(page):
-    """一次性把三类清理都跑一遍，点击前调用最保险。"""
-    nuke_ad_modal_only(page)
-    nuke_generic_overlays_safe(page)
-    dismiss_blocking_dialogs(page)
+        }''')
+    except:
+        pass
 
 
 def do_login(page):
@@ -100,8 +97,11 @@ def do_login(page):
     page.goto("https://agent.minimax.io/")
     page.wait_for_timeout(6000)
 
-    print("🛡️ 正在清理广告弹窗 / 公告遮罩...")
-    clear_all_blockers(page)
+    # 保留原始页面截图，方便排查签到面板到底长什么样、是否真的被挡住
+    page.screenshot(path="debug_raw_page_before_cleanup.png")
+
+    print("🛡️ 仅清理明确的广告弹窗（不再批量删除遮罩/对话框）...")
+    nuke_ad_modal_only(page)
     page.wait_for_timeout(1000)
 
     email_input = page.locator('input[placeholder="Enter your email"]')
@@ -171,6 +171,9 @@ def poll_for_checkin_button(page, round_no):
     在当前页面轮询检测签到按钮。
     返回 (status, checkin_btn)
     status: "found" / "already_done" / "not_loaded"
+
+    注意：轮询过程中不再做任何"批量删除遮罩/对话框"的操作，
+    只做精确匹配的广告清理，避免误删签到面板本身。
     """
     checkin_btn = None
     panel_seen = False
@@ -191,9 +194,6 @@ def poll_for_checkin_button(page, round_no):
 
         print(f"⌛ [第 {round_no} 轮] 第 {i+1}/{POLLS_PER_ROUND} 次未检测到签到按钮，继续等待...")
 
-        if not panel_seen:
-            nuke_generic_overlays_safe(page)
-
     page.screenshot(path=f"dashboard_round{round_no}.png")
 
     if checkin_btn is not None:
@@ -211,18 +211,14 @@ def poll_for_checkin_button(page, round_no):
 def click_checkin_and_verify(page, checkin_btn, round_no):
     """
     点击签到按钮，并在点击后验证是否真正生效。
-    点击前先彻底清除所有可能拦截点击事件的弹窗/遮罩（包括不可见的全屏公告层）。
+    如果点击被拦截（说明上面确实盖了一层东西），优先尝试"点击关闭按钮"
+    而不是删除 DOM；实在不行再用 force 点击兜底，绝不主动删除元素。
     返回 (success: bool, points_val: str)
     """
     btn_text_before = checkin_btn.inner_text().strip()
     points_val = extract_points(btn_text_before)
 
     print(f"👆 [第 {round_no} 轮] 找到签到按钮 [{btn_text_before}]，准备点击...")
-
-    # 点击前先彻底清理一遍拦截层，尤其是不可见的全屏 role=dialog 公告弹窗
-    print("🧹 点击前先清除所有可能拦截点击的弹窗/遮罩...")
-    clear_all_blockers(page)
-    page.wait_for_timeout(500)
 
     clicked_normally = False
     try:
@@ -232,10 +228,14 @@ def click_checkin_and_verify(page, checkin_btn, round_no):
         checkin_btn.click(timeout=5000)
         clicked_normally = True
     except Exception as e:
-        print(f"⚠️ 正常点击失败 ({str(e)[:200]})，再清理一次遮罩后改用 force 点击兜底...")
-        # 再清一次，防止点击过程中弹窗又刷新出现
-        clear_all_blockers(page)
+        print(f"⚠️ 正常点击失败 ({str(e)[:200]})，尝试点掉明显的广告关闭按钮后重试...")
+        try_close_obvious_ad_by_click(page)
         page.wait_for_timeout(500)
+        try:
+            checkin_btn.click(timeout=5000)
+            clicked_normally = True
+        except Exception as e2:
+            print(f"⚠️ 再次点击仍失败 ({str(e2)[:200]})，改用 force 点击兜底...")
 
     if not clicked_normally:
         try:
@@ -243,9 +243,9 @@ def click_checkin_and_verify(page, checkin_btn, round_no):
         except Exception as e:
             print(f"❌ force 点击也失败: {str(e)[:200]}")
 
-    # 等待页面响应，再次清理，然后截图确认
+    # 等待页面响应，然后截图确认（不再做批量清理）
     page.wait_for_timeout(3000)
-    clear_all_blockers(page)
+    nuke_ad_modal_only(page)
     page.wait_for_timeout(2000)
     page.screenshot(path=f"after_click_round{round_no}.png")
 
@@ -290,7 +290,7 @@ def main():
                     print("🔄 不重新登录，直接刷新签到页面...")
                     page.reload()
                     page.wait_for_timeout(6000)
-                    clear_all_blockers(page)
+                    nuke_ad_modal_only(page)
                     page.wait_for_timeout(1000)
 
                 status, checkin_btn = poll_for_checkin_button(page, round_no)
@@ -351,7 +351,7 @@ def main():
                     f"1. 网站页面结构发生变化\n"
                     f"2. 登录状态异常\n"
                     f"3. 网络异常\n"
-                    f"请去 Actions 下载各轮次截图查看详情。"
+                    f"请去 Actions 下载各轮次截图（尤其是 debug_raw_page_before_cleanup.png）查看详情。"
                 )
             send_telegram_msg(msg)
 
